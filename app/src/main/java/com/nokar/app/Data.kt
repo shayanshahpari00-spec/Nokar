@@ -20,7 +20,10 @@ class Prefs(ctx: Context) {
         get() = sp.getString("key", "") ?: ""
         set(v) = sp.edit().putString("key", v.trim()).apply()
     var model: String
-        get() = sp.getString("model", DEFAULT_MODEL) ?: DEFAULT_MODEL
+        get() {
+            val m = sp.getString("model", DEFAULT_MODEL) ?: DEFAULT_MODEL
+            return if (m.contains("claude")) DEFAULT_MODEL else m
+        }
         set(v) = sp.edit().putString("model", v.trim().ifBlank { DEFAULT_MODEL }).apply()
     var autoSpeak: Boolean
         get() = sp.getBoolean("speak", true)
@@ -29,7 +32,7 @@ class Prefs(ctx: Context) {
         get() = sp.getString("history", "[]") ?: "[]"
         set(v) = sp.edit().putString("history", v).apply()
 
-    companion object { const val DEFAULT_MODEL = "claude-sonnet-5-5" }
+    companion object { const val DEFAULT_MODEL = "gemini-2.5-flash" }
 }
 
 object Claude {
@@ -58,23 +61,23 @@ object Claude {
 
     fun ask(key: String, model: String, subject: String, history: List<Msg>): String {
         require(key.isNotBlank()) { "اول کلید API را از ⚙️ تنظیمات وارد کن." }
-        val msgs = JSONArray()
+        val contents = JSONArray()
         history.takeLast(20).dropWhile { it.role != "user" }.forEach { m ->
-            val content = JSONArray()
-            if (m.image != null) content.put(JSONObject()
-                .put("type", "image")
-                .put("source", JSONObject().put("type", "base64")
-                    .put("media_type", "image/jpeg").put("data", b64(m.image))))
-            content.put(JSONObject().put("type", "text").put("text", m.text))
-            msgs.put(JSONObject().put("role", m.role).put("content", content))
+            val parts = JSONArray()
+            if (m.image != null) parts.put(JSONObject().put("inline_data",
+                JSONObject().put("mime_type", "image/jpeg").put("data", b64(m.image))))
+            parts.put(JSONObject().put("text", m.text))
+            contents.put(JSONObject()
+                .put("role", if (m.role == "user") "user" else "model")
+                .put("parts", parts))
         }
         val body = JSONObject()
-            .put("model", model).put("max_tokens", 1200)
-            .put("system", system(subject)).put("messages", msgs)
+            .put("system_instruction", JSONObject().put("parts",
+                JSONArray().put(JSONObject().put("text", system(subject)))))
+            .put("contents", contents)
         val req = Request.Builder()
-            .url("https://api.anthropic.com/v1/messages")
-            .header("x-api-key", key)
-            .header("anthropic-version", "2023-06-01")
+            .url("https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent")
+            .header("x-goog-api-key", key)
             .post(body.toString().toRequestBody("application/json".toMediaType()))
             .build()
         http.newCall(req).execute().use { r ->
@@ -83,8 +86,10 @@ object Claude {
                 val m = runCatching { JSONObject(s).getJSONObject("error").getString("message") }.getOrDefault(s.take(150))
                 error("خطا (${r.code}): $m")
             }
-            val c = JSONObject(s).getJSONArray("content")
-            return buildString { for (i in 0 until c.length()) append(c.getJSONObject(i).optString("text")) }.trim()
+            val parts = JSONObject(s).optJSONArray("candidates")
+                ?.optJSONObject(0)?.optJSONObject("content")?.optJSONArray("parts")
+                ?: error("جواب خالی بود. یه جور دیگه بپرس.")
+            return buildString { for (i in 0 until parts.length()) append(parts.getJSONObject(i).optString("text")) }.trim()
         }
     }
 }
